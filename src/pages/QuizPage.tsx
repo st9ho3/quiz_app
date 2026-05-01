@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
-import { useLocation } from 'react-router-dom';
-import '../App.css';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate, Link } from 'react-router-dom';
+import { Clock, ArrowLeft, ArrowRight, FileText } from 'lucide-react';
 
 interface Question {
   question: string;
@@ -8,306 +8,266 @@ interface Question {
   correct_answer: string;
 }
 
-const modules = import.meta.glob('../*.json', { eager: true });
-const allQuizGroups: Record<string, Question[]> = {};
+const TIMER_SECONDS = 3600; // 1 hour, fixed
 
-for (const path in modules) {
-  const name = path.replace('../', '').replace('.json', '').replace(/_/g, ' ');
-  // Filter out package.json or tsconfig.json if they accidentally got here
-  if (path.includes('questions') || (Array.isArray((modules[path] as any).default) && (modules[path] as any).default.length > 0)) {
-    allQuizGroups[name] = (modules[path] as any).default as Question[];
+const fallbackModules = import.meta.glob('../*.json', { eager: true });
+const fallbackQuestions: Question[] = (() => {
+  for (const path in fallbackModules) {
+    if (!path.includes('questions')) continue;
+    const mod = fallbackModules[path] as { default?: Question[] };
+    if (Array.isArray(mod.default) && mod.default.length > 0) return mod.default;
   }
+  return [];
+})();
+
+function pad(n: number) { return n.toString().padStart(2, '0'); }
+function formatMMSS(s: number) {
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${pad(m)}:${pad(sec)}`;
 }
 
-const MAX_TIME = 3600; // 1 hour in seconds
-const MAX_SCORE = 10;
-
-function QuizPage() {
+export default function QuizPage() {
   const location = useLocation();
-  const uploadedQuestions = location.state?.questions as Question[] | undefined;
+  const navigate = useNavigate();
 
-  const availableGroups = uploadedQuestions 
-    ? { 'Uploaded Quiz': uploadedQuestions, ...allQuizGroups }
-    : allQuizGroups;
-    
-  const availableGroupNames = Object.keys(availableGroups);
+  const incoming = location.state?.questions as Question[] | undefined;
+  const source = (location.state?.source as string | undefined) || 'sample quiz';
 
-  const [selectedGroup, setSelectedGroup] = useState<string>(
-    uploadedQuestions ? 'Uploaded Quiz' : (availableGroupNames[0] || '')
+  const questions = useMemo<Question[]>(
+    () => (incoming && incoming.length > 0 ? incoming : fallbackQuestions),
+    [incoming]
   );
 
+  const [idx, setIdx] = useState(0);
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [seconds, setSeconds] = useState(TIMER_SECONDS);
+  const [transitioning, setTransitioning] = useState(false);
+
+  // Always finalize with the freshest answers map.
+  const answersRef = useRef(answers);
+  useEffect(() => { answersRef.current = answers; }, [answers]);
+  const secondsRef = useRef(seconds);
+  useEffect(() => { secondsRef.current = seconds; }, [seconds]);
+
+  // Timer
   useEffect(() => {
-    if (uploadedQuestions) {
-      setSelectedGroup('Uploaded Quiz');
-    } else if (!availableGroupNames.includes(selectedGroup)) {
-      setSelectedGroup(availableGroupNames[0] || '');
-    }
-  }, [uploadedQuestions]);
-  const [gameState, setGameState] = useState<'start' | 'playing' | 'results' | 'review'>('start');
-  const [currentQuestionIdx, setCurrentQuestionIdx] = useState(0);
-  const [selectedAnswers, setSelectedAnswers] = useState<Record<number, string>>({});
-  const [timeLeft, setTimeLeft] = useState(MAX_TIME);
+    if (questions.length === 0) return;
+    const id = window.setInterval(() => {
+      setSeconds((s) => {
+        if (s <= 1) {
+          window.clearInterval(id);
+          // auto-submit on timeout
+          finalize(answersRef.current, 0);
+          return 0;
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [questions.length]);
 
-  const questions = availableGroups[selectedGroup] || [];
-  const WEIGHT_PER_QUESTION = questions.length > 0 ? MAX_SCORE / questions.length : 0;
-
-  useEffect(() => {
-    let timer: number;
-    if (gameState === 'playing' && timeLeft > 0) {
-      timer = window.setInterval(() => {
-        setTimeLeft((prev) => {
-          if (prev <= 1) {
-            setGameState('results');
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
-    return () => window.clearInterval(timer);
-  }, [gameState, timeLeft]);
-
-  const handleStart = () => {
-    setGameState('playing');
-    setTimeLeft(MAX_TIME);
-    setCurrentQuestionIdx(0);
-    setSelectedAnswers({});
-  };
-
-  const handleAnswerSelect = (option: string) => {
-    setSelectedAnswers(prev => ({
-      ...prev,
-      [currentQuestionIdx]: option
-    }));
-  };
-
-  const handleNext = () => {
-    if (currentQuestionIdx < questions.length - 1) {
-      setCurrentQuestionIdx(prev => prev + 1);
-    } else {
-      setGameState('results');
-    }
-  };
-
-  const handlePrevious = () => {
-    if (currentQuestionIdx > 0) {
-      setCurrentQuestionIdx(prev => prev - 1);
-    }
-  };
-
-  const formatTime = (seconds: number) => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    if (h > 0) {
-      return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-    }
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
-
-  const calculateScore = () => {
-    let correctCount = 0;
-    questions.forEach((q, idx) => {
-      if (selectedAnswers[idx] === q.correct_answer) {
-        correctCount++;
-      }
+  const finalize = (finalAnswers: Record<number, string>, timeRemaining = secondsRef.current) => {
+    navigate('/results', {
+      state: { questions, answers: finalAnswers, timeRemaining, source },
     });
-    return correctCount * WEIGHT_PER_QUESTION;
+  };
+
+  if (questions.length === 0) {
+    return (
+      <div className="quiz-empty">
+        <style>{QUIZ_CSS}</style>
+        <div className="card empty-card">
+          <div className="empty-icon"><FileText size={20} strokeWidth={1.6} /></div>
+          <h2 className="empty-title">No quiz loaded</h2>
+          <p className="empty-sub">Upload a PDF or pick something from your library to get started.</p>
+          <Link to="/upload" className="btn btn-primary btn-sm">
+            Go to upload <ArrowRight size={13} strokeWidth={1.8} />
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  const q = questions[idx];
+  const selected = answers[idx];
+  const answeredCount = Object.keys(answers).length;
+  const isLast = idx === questions.length - 1;
+  const timerWarn = seconds < 60;
+
+  const select = (opt: string) => setAnswers((a) => ({ ...a, [idx]: opt }));
+
+  const advance = (delta: number) => {
+    if (transitioning) return;
+    const next = idx + delta;
+    if (next < 0 || next >= questions.length) return;
+    setTransitioning(true);
+    window.setTimeout(() => {
+      setIdx(next);
+      setTransitioning(false);
+    }, 160);
   };
 
   return (
-    <div className="glass-card quiz-container">
-      
-      {gameState === 'start' && (
-        <div className="start-screen">
-          <h1 className="title">IT Management Quiz</h1>
-          
-          {availableGroupNames.length > 0 ? (
-            <>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '100%', maxWidth: '400px', margin: '0 auto' }}>
-                <label htmlFor="quiz-select" style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>Select Quiz Group:</label>
-                <select 
-                  id="quiz-select"
-                  value={selectedGroup} 
-                  onChange={(e) => setSelectedGroup(e.target.value)}
-                  style={{
-                    padding: '1rem',
-                    borderRadius: '12px',
-                    background: 'rgba(0,0,0,0.3)',
-                    color: 'var(--text-primary)',
-                    border: '1px solid rgba(255,255,255,0.2)',
-                    fontSize: '1.1rem',
-                    outline: 'none',
-                    cursor: 'pointer'
-                  }}
-                >
-                  {availableGroupNames.map(name => (
-                    <option key={name} value={name} style={{ background: '#1e293b' }}>
-                      {name.charAt(0).toUpperCase() + name.slice(1)}
-                    </option>
-                  ))}
-                </select>
-              </div>
+    <div className="quiz-screen">
+      <style>{QUIZ_CSS}</style>
 
-              <p>
-                Test your knowledge with these {questions.length} questions.
-                You have a maximum of 1 hour to complete the quiz. 
-                Each question contributes {WEIGHT_PER_QUESTION.toFixed(2)} points towards a maximum score of {MAX_SCORE}.
-              </p>
-              <button className="btn-primary" onClick={handleStart} disabled={questions.length === 0}>
-                Start Quiz
-              </button>
-            </>
-          ) : (
-            <p>No question files found in the source directory.</p>
-          )}
+      <div className="quiz-meta">
+        <div className="src-chip">
+          <span className="dot peach" />
+          <span className="src-name">{source}</span>
+          <span className="mono src-idx">{pad(idx + 1)} / {pad(questions.length)}</span>
         </div>
-      )}
-
-      {gameState === 'playing' && (
-        <>
-          <div className="header">
-            <h1 className="title">Quiz</h1>
-            <div className={`timer ${timeLeft < 300 ? 'warning' : ''}`}>
-              ⏱ {formatTime(timeLeft)}
-            </div>
-          </div>
-
-          <div className="question-section">
-            <div className="question-count">
-              <span>Question {currentQuestionIdx + 1}</span>/{questions.length}
-            </div>
-            <div className="question-text">
-              {questions[currentQuestionIdx].question}
-            </div>
-          </div>
-
-          <div className="options-section">
-            {questions[currentQuestionIdx].options.map((option, index) => {
-              const isSelected = selectedAnswers[currentQuestionIdx] === option;
-              return (
-                <button
-                  key={index}
-                  className={`option-button ${isSelected ? 'selected' : ''}`}
-                  onClick={() => handleAnswerSelect(option)}
-                >
-                  {option}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="controls" style={{ justifyContent: currentQuestionIdx > 0 ? 'space-between' : 'flex-end' }}>
-            {currentQuestionIdx > 0 && (
-              <button className="btn-primary" onClick={handlePrevious} style={{ background: 'rgba(255,255,255,0.1)' }}>
-                Previous
-              </button>
-            )}
-            <button 
-              className="btn-primary" 
-              onClick={handleNext}
-              disabled={!selectedAnswers[currentQuestionIdx]}
-            >
-              {currentQuestionIdx === questions.length - 1 ? 'Finish' : 'Next'}
-            </button>
-          </div>
-        </>
-      )}
-
-      {gameState === 'results' && (() => {
-        const score = calculateScore();
-        const percentage = (score / MAX_SCORE) * 100;
-        return (
-          <div className="results-section">
-            <h1 className="title">Quiz Completed!</h1>
-            
-            <div className="score-circle" style={{ '--percentage': `${percentage}%` } as React.CSSProperties}>
-              <div className="score-text">
-                <span className="score-value">{score.toFixed(1)}</span>
-                <span className="score-max">/ {MAX_SCORE}</span>
-              </div>
-            </div>
-
-            <div className="results-details">
-              <p>You answered <strong>{score / WEIGHT_PER_QUESTION}</strong> out of <strong>{questions.length}</strong> questions correctly.</p>
-              <p>Time remaining: <strong>{formatTime(timeLeft)}</strong></p>
-            </div>
-
-            <div style={{ display: 'flex', gap: '1rem', marginTop: '2rem' }}>
-              <button className="btn-primary" onClick={() => setGameState('review')} style={{ background: 'rgba(255,255,255,0.1)' }}>
-                Review Answers
-              </button>
-              <button className="btn-primary" onClick={handleStart}>
-                Restart Quiz
-              </button>
-            </div>
-          </div>
-        );
-      })()}
-
-      {gameState === 'review' && (
-        <div className="review-container" style={{ width: '100%', display: 'flex', flexDirection: 'column' }}>
-          <div className="review-header">
-            <h1 className="title" style={{ fontSize: '2rem' }}>Review Answers</h1>
-            <button className="btn-primary" onClick={() => setGameState('results')} style={{ padding: '0.5rem 1rem', fontSize: '1rem', background: 'rgba(255,255,255,0.1)' }}>
-              Back to Results
-            </button>
-          </div>
-          
-          <div className="review-section">
-            {questions.map((q, idx) => {
-              const userAnswer = selectedAnswers[idx];
-              
-              return (
-                <div key={idx} className="review-item">
-                  <div className="review-question">
-                    {q.question}
-                  </div>
-                  
-                  {!userAnswer && (
-                    <div className="review-answer missed" style={{ padding: '0.4rem 0.8rem', fontSize: '0.9rem', marginBottom: '0.5rem' }}>
-                      ⚠️ No answer provided
-                    </div>
-                  )}
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    {q.options.map((option, optIdx) => {
-                      const isSelected = option === userAnswer;
-                      const isCorrect = option === q.correct_answer;
-                      
-                      let optionClass = 'neutral';
-                      let icon = '⚪';
-                      
-                      if (isCorrect) {
-                        optionClass = 'correct';
-                        icon = '✅';
-                      } else if (isSelected) {
-                        optionClass = 'wrong';
-                        icon = '❌';
-                      }
-
-                      return (
-                        <div key={optIdx} className={`review-answer ${optionClass}`}>
-                          {icon} {option} {isSelected && !isCorrect ? '(Your Answer)' : ''} {isCorrect && isSelected ? '(Your Answer)' : ''}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          
-          <div className="review-controls">
-            <button className="btn-primary" onClick={handleStart}>
-              Restart Quiz
-            </button>
-          </div>
+        <div className={`timer-pill ${timerWarn ? 'warn' : ''}`}>
+          <Clock size={13} strokeWidth={1.8} />
+          <span className="mono">{formatMMSS(seconds)}</span>
         </div>
-      )}
-      
+      </div>
+
+      <article className={`quiz-card ${transitioning ? 'fading' : 'showing'}`}>
+        <div className="eyebrow coral">QUESTION {idx + 1}</div>
+        <h2 className="q-text">{q.question}</h2>
+
+        <div className="options">
+          {q.options.map((opt, oi) => {
+            const isSel = opt === selected;
+            const key = String.fromCharCode(65 + oi);
+            return (
+              <button
+                key={oi}
+                type="button"
+                className={`option ${isSel ? 'selected' : ''}`}
+                onClick={() => select(opt)}
+              >
+                <span className="radio"><span className="radio-inner" /></span>
+                <span className="opt-key mono">{key}</span>
+                <span className="opt-text">{opt}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="quiz-actions">
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => advance(-1)}
+            disabled={idx === 0}
+          >
+            <ArrowLeft size={14} strokeWidth={1.8} /> Previous
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary btn-lg"
+            onClick={() => (isLast ? finalize(answers) : advance(1))}
+            disabled={!selected}
+          >
+            {isLast ? 'Submit answers' : 'Next question'} <ArrowRight size={14} strokeWidth={1.8} />
+          </button>
+        </div>
+      </article>
+
+      <div className="quiz-footer">
+        <span className="mono answered">{answeredCount} / {questions.length} ANSWERED</span>
+        <div className="pips">
+          {questions.map((_, i) => {
+            const cls = i === idx ? 'current' : answers[i] ? 'answered' : 'pending';
+            return <span key={i} className={`pip ${cls}`} />;
+          })}
+        </div>
+        <button type="button" className="end-link" onClick={() => finalize(answers)}>end session early</button>
+      </div>
     </div>
   );
 }
 
-export default QuizPage;
+const QUIZ_CSS = `
+.quiz-screen { max-width: 720px; margin: 0 auto; padding: 40px 28px 80px; display: flex; flex-direction: column; gap: 22px; }
+.quiz-meta { display: flex; justify-content: space-between; align-items: center; }
+
+.src-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 12px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-pill); font-size: 12.5px; color: var(--ink-2);
+  max-width: 60%;
+}
+.src-chip .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.src-chip .dot.peach { background: var(--peach); }
+.src-name { font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.src-idx { color: var(--muted); flex-shrink: 0; }
+
+.timer-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-pill); font-size: 12.5px;
+  transition: all 0.2s ease;
+}
+.timer-pill.warn { background: var(--coral-soft); color: var(--coral); border-color: var(--coral); }
+
+.quiz-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 36px 36px 32px;
+  box-shadow: var(--sh-quiz);
+  display: flex; flex-direction: column; gap: 18px;
+  transition: opacity 0.16s ease;
+}
+.quiz-card.fading { opacity: 0.4; }
+.quiz-card.showing { opacity: 1; animation: fadeUp 0.32s cubic-bezier(0.2, 0.8, 0.2, 1); }
+
+.q-text { font-size: 22px; font-weight: 500; line-height: 1.35; letter-spacing: -0.015em; color: var(--ink); margin: 0; }
+
+.options { display: flex; flex-direction: column; gap: 10px; }
+.option {
+  width: 100%; text-align: left;
+  display: grid; grid-template-columns: auto auto 1fr; align-items: center; gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 16px 18px;
+  transition: all 0.15s ease;
+}
+.option:hover { border-color: var(--border-strong); }
+.option.selected {
+  background: var(--peach-soft); border-color: var(--peach-deep);
+  box-shadow: 0 0 0 2px rgba(232,153,104,0.18);
+}
+.radio {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid var(--border-strong); background: var(--surface-2);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.option.selected .radio { border-color: var(--coral); background: var(--coral); }
+.radio-inner { width: 0; height: 0; }
+.option.selected .radio-inner { width: 6px; height: 6px; border-radius: 50%; background: var(--surface); }
+.opt-key { font-size: 11px; color: var(--muted); width: 14px; }
+.opt-text { font-size: 14.5px; line-height: 1.5; color: var(--ink); }
+
+.quiz-actions {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 8px;
+}
+
+.quiz-footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 0 4px;
+}
+.answered { font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }
+.pips { display: flex; gap: 4px; }
+.pip { width: 18px; height: 4px; border-radius: 2px; background: var(--border); }
+.pip.answered { background: var(--ink-2); }
+.pip.current { background: var(--coral); }
+.end-link {
+  font-size: 12px; color: var(--muted); text-decoration: underline; text-underline-offset: 3px;
+  background: none;
+}
+.end-link:hover { color: var(--ink-2); }
+
+.quiz-empty { max-width: 720px; margin: 0 auto; padding: 80px 28px; }
+.empty-card { padding: 36px; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; }
+.empty-icon { width: 44px; height: 44px; border-radius: var(--r-md); background: var(--peach-soft); color: var(--coral); display: inline-flex; align-items: center; justify-content: center; }
+.empty-title { font-family: var(--font-serif); font-size: 26px; font-weight: 400; letter-spacing: -0.02em; }
+.empty-sub { font-size: 14px; color: var(--muted); margin-bottom: 6px; }
+`;

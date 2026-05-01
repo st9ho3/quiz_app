@@ -286,3 +286,57 @@ async def upload_pdf_stream(
                 os.remove(tmp_pdf_path)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ── Saved-quiz library endpoints ──
+
+QUIZZES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
+SAFE_NAME_RE = re.compile(r"^[\w\-. ]+_questions\.json$")
+
+
+@app.get("/quizzes")
+async def list_quizzes():
+    """List all *_questions.json files in src/ with question count and mtime."""
+    if not os.path.isdir(QUIZZES_DIR):
+        return {"quizzes": []}
+
+    items = []
+    for name in os.listdir(QUIZZES_DIR):
+        if not name.endswith("_questions.json"):
+            continue
+        path = os.path.join(QUIZZES_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            count = len(data) if isinstance(data, list) else 0
+            mtime = os.path.getmtime(path)
+            items.append({
+                "filename": name,
+                "display_name": name.replace("_questions.json", "").replace("_", " "),
+                "question_count": count,
+                "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(mtime)) + "Z",
+                "_mtime": mtime,
+            })
+        except Exception:
+            continue
+
+    items.sort(key=lambda x: x["_mtime"], reverse=True)
+    for it in items:
+        it.pop("_mtime", None)
+    return {"quizzes": items}
+
+
+@app.get("/quizzes/{filename}")
+async def get_quiz(filename: str):
+    """Return the questions array for one saved quiz file."""
+    if not SAFE_NAME_RE.match(filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    path = os.path.join(QUIZZES_DIR, filename)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read quiz: {e}")
+    return {"filename": filename, "questions": data}
