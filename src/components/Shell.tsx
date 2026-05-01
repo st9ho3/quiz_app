@@ -6,6 +6,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation();
   const onUpload = pathname === '/' || pathname === '/upload';
   const onQuiz = pathname.startsWith('/quiz') || pathname.startsWith('/results');
+  const onLibrary = pathname.startsWith('/library');
 
   return (
     <>
@@ -26,10 +27,10 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         </nav>
 
         <div className="topbar-right">
-          <button className="btn btn-ghost btn-sm" type="button">
+          <Link to="/library" className={`btn btn-ghost btn-sm ${onLibrary ? 'btn-ghost-active' : ''}`}>
             <BookOpen size={14} strokeWidth={1.6} />
             Library
-          </button>
+          </Link>
           <span className="avatar" aria-hidden>NK</span>
         </div>
       </header>
